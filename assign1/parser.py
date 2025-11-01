@@ -25,9 +25,19 @@ class WhilePyVisitor(ast.NodeVisitor):
             elif node.func.id == 'invariant':
                 assert len(node.args) == 1
                 return ['invariant', self.visit(node.args[0])]
+            elif node.func.id == 'requires':
+                assert len(node.args) == 1
+                return ['requires', self.visit(node.args[0])]
+            elif node.func.id == 'ensures':
+                assert len(node.args) == 1
+                return ['ensures', self.visit(node.args[0])]
             elif node.func.id == 'len':
                 assert len(node.args) == 1
                 return ['len', self.visit(node.args[0])]
+            elif node.func.id == 'old':
+                # old(x) -> ['old', <expr>]
+                assert len(node.args) == 1
+                return ['old', self.visit(node.args[0])]
         raise NotImplementedError(ast.dump(node))
     
     def visit_Const(self, node):
@@ -130,6 +140,36 @@ class WhilePyVisitor(ast.NodeVisitor):
                     inv = self.visit(call.args[0])
                     invariants.append(inv)
         return ['while', test, body, invariants]
+
+    def visit_FunctionDef(self, node):
+        name = node.name
+        params = [arg.arg for arg in node.args.args]
+
+        requires = []
+        ensures = []
+        body = list(map(self.visit, node.body))
+
+        for stmt in node.body:
+            # look for top-level require/ensure calls written as Expr(Call(Name, ...))
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
+                fid = stmt.value.func.id
+                if fid == 'requires':
+                    assert len(stmt.value.args) == 1
+                    requires.append(self.visit(stmt.value.args[0]))
+                    continue
+                if fid == 'ensures':
+                    assert len(stmt.value.args) == 1
+                    ensures.append(self.visit(stmt.value.args[0]))
+                    continue
+
+        # return shape: ['proc', name, params, requires_list, ensures_list, body]
+        return ['proc', name, params, requires, ensures, body]
+
+    def visit_Return(self, node):
+        # represent return as ['return', value] (value may be None)
+        if node.value is None:
+            return ['return']
+        return ['return', self.visit(node.value)]
     
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

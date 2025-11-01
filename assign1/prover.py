@@ -4,6 +4,44 @@ from z3 import *
 _array_vars = set()
 # _array_lengths: name -> z3.Int('len_<name>') canonical symbol (created on-demand) OR an int for concrete lengths
 _array_lengths = {}
+# procedures: name -> dict with keys: params, requires, ensures, body
+_procedures = {}
+# record procedures that failed verification; if non-empty, the whole program
+# should not be reported as correct even if the global VC holds
+_failed_procedures = []
+
+def _replace_old_nodes(node, func_name):
+    """Replace ['old', ['var', p]] with ['var', '__old_<p>_<func>'] in the AST node (recursively).
+    Only supports old(var) currently.
+    """
+    if not isinstance(node, list):
+        return node
+    if len(node) == 0:
+        return node
+    head = node[0]
+    if head == 'old':
+        # expect ['old', ['var', name]]
+        arg = node[1]
+        if isinstance(arg, list) and arg[0] == 'var':
+            name = arg[1]
+            return ['var', f"__old_{name}_{func_name}"]
+        else:
+            raise NotImplementedError("old(...) currently only supports variables")
+    # otherwise recurse
+    return [head] + [_replace_old_nodes(child, func_name) for child in node[1:]]
+
+def _replace_vars_mapping(node, mapping):
+    """Replace occurrences of ['var', name] according to mapping dict {name: newname}.
+    Works recursively on the AST lists.
+    """
+    if not isinstance(node, list):
+        return node
+    if len(node) == 0:
+        return node
+    if node[0] == 'var':
+        name = node[1]
+        return ['var', mapping.get(name, name)]
+    return [node[0]] + [_replace_vars_mapping(child, mapping) for child in node[1:]]
 
 def _ensure_len_symbol(name):
     """Return the canonical z3.Int symbol for length of `name` (create if needed)."""
@@ -35,6 +73,14 @@ def wp(stmt, post):
             return And(Implies(test_z3, wp_body), Implies(Not(test_z3), wp_orelse))
 
         case ['skip']:
+            return post
+
+        case ['requires', cond]:
+            # treat requires in a body as metadata (handled separately); skip
+            return post
+
+        case ['ensures', cond]:
+            # treat ensures in a body as metadata (handled separately); skip
             return post
 
         case ['assign', var, expr]:
@@ -92,6 +138,16 @@ def wp(stmt, post):
                     _array_lengths.pop(var, None)
                 return substitute(post, (Int(var), expr_z3))
 
+        case ['return', *rest]:
+            # On return, bind the special symbol `ret` to the returned expression
+            # in the postcondition so `ensures` can refer to the return value.
+            if len(rest) == 0:
+                # no return value -> use 0 as a sentinel
+                return substitute(post, (Int('ret'), IntVal(0)))
+            ret_expr = rest[0]
+            ret_z3 = expr_to_z3(ret_expr)
+            return substitute(post, (Int('ret'), ret_z3))
+
         case ['tastore', arr, idx, val]:
             arr_z3 = expr_to_z3(arr)
             idx_z3 = expr_to_z3(idx)
@@ -104,6 +160,53 @@ def wp(stmt, post):
         case ['invariant', *rest]:
             # invariants do not affect the weakest precondition
             return BoolVal(True)
+        
+        case ['proc', name, params, requires, ensures, body]:
+            # register procedure contracts for later use
+            _procedures[name] = {
+                'params': params,
+                'requires': requires,
+                'ensures': ensures,
+                'body': body,
+            }
+
+            # Verify the procedure: under requires (on initial param values), the
+            # body should establish ensures. We model initial parameter values
+            # as special variables named __old_<p>_<proc> and replace old(p)
+            # occurrences in ensures with those symbols.
+            # 1) build requires_z3 over initial values
+            req_conjs = []
+            for r in requires:
+                req_conjs.append(expr_to_z3(r))
+            requires_z3 = And(*req_conjs) if req_conjs else BoolVal(True)
+
+            # 2) build ensures_z3 where old(p) -> __old_p_func
+            ens_conjs = []
+            for e in ensures:
+                e2 = _replace_old_nodes(e, name)
+                ens_conjs.append(expr_to_z3(e2))
+            ensures_z3 = And(*ens_conjs) if ens_conjs else BoolVal(True)
+
+            # 3) compute WP of the procedure body w.r.t. ensures
+            pre_for_body = wp(['seq'] + body, ensures_z3)
+
+            # 4) check that requires => pre_for_body is valid
+            solver = Solver()
+            # parameters at function entry equal the __old_<p>_<func> symbols
+            entry_eqs = [Int(p) == Int(f"__old_{p}_{name}") for p in params]
+            solver.add(requires_z3)
+            solver.add(*entry_eqs)
+            solver.add(Not(pre_for_body))
+            ok = solver.check() == unsat
+            if not ok:
+                print(f"Procedure {name} FAILED verification; counterexample:")
+                print(solver.model())
+                _failed_procedures.append(name)
+            else:
+                print(f"Procedure {name} verified.")
+
+            # procedure definitions do not change the WP of the surrounding code
+            return post
 
         case ['while', cond, body, invariants]:
             cond_z3 = expr_to_z3(cond)
@@ -204,7 +307,16 @@ def prove(stmt):
     print(pre)
     s = Solver()
     s.add(Not(pre))
-    if s.check() == unsat:
+    res = s.check()
+
+    # If any procedure failed verification earlier, the whole program is
+    # considered incorrect even if the global VC holds.
+    if _failed_procedures:
+        print("The following procedures FAILED verification:", _failed_procedures)
+        print("The program is incorrect.")
+        return
+
+    if res == unsat:
         print("The program is correct.")
     else:
         print("The program is incorrect.")
