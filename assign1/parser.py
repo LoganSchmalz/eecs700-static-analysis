@@ -25,6 +25,9 @@ class WhilePyVisitor(ast.NodeVisitor):
             elif node.func.id == 'invariant':
                 assert len(node.args) == 1
                 return ['invariant', self.visit(node.args[0])]
+            elif node.func.id == 'len':
+                assert len(node.args) == 1
+                return ['len', self.visit(node.args[0])]
         raise NotImplementedError(ast.dump(node))
     
     def visit_Const(self, node):
@@ -44,25 +47,33 @@ class WhilePyVisitor(ast.NodeVisitor):
         return ['if', test, body, orelse]
     
     def visit_Compare(self, node):
-        assert len(node.ops) == 1
-        assert len(node.comparators) == 1
+        # support chained comparisons: a < b < c  ->  ['and', ['<', a, b], ['<', b, c]]
         left = self.visit(node.left)
-        right = self.visit(node.comparators[0])
-        op = node.ops[0]
-        if isinstance(op, ast.Lt):
-            return ['<', left, right]
-        elif isinstance(op, ast.LtE):
-            return ['<=', left, right]
-        elif isinstance(op, ast.Gt):
-            return ['>', left, right]
-        elif isinstance(op, ast.GtE):
-            return ['>=', left, right]
-        elif isinstance(op, ast.Eq):
-            return ['==', left, right]
-        elif isinstance(op, ast.NotEq):
-            return ['!=', left, right]
-        else:
-            raise NotImplementedError(ast.dump(node))
+        comparisons = []
+        prev = left
+        for op, comp in zip(node.ops, node.comparators):
+            right = self.visit(comp)
+            if isinstance(op, ast.Lt):
+                comparisons.append(['<', prev, right])
+            elif isinstance(op, ast.LtE):
+                comparisons.append(['<=', prev, right])
+            elif isinstance(op, ast.Gt):
+                comparisons.append(['>', prev, right])
+            elif isinstance(op, ast.GtE):
+                comparisons.append(['>=', prev, right])
+            elif isinstance(op, ast.Eq):
+                comparisons.append(['==', prev, right])
+            elif isinstance(op, ast.NotEq):
+                comparisons.append(['!=', prev, right])
+            else:
+                raise NotImplementedError(ast.dump(node))
+            prev = right
+
+        # if there's only one comparison, return it directly
+        if len(comparisons) == 1:
+            return comparisons[0]
+        # otherwise combine with a top-level 'and' node
+        return ['and'] + comparisons
     
     def visit_Name(self, node):
         return ['var', node.id]
