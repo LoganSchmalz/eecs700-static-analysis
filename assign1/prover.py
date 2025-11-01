@@ -1,82 +1,86 @@
 from z3 import *
 
 def wp(stmt, post):
-    if stmt[0] == 'seq':
-        for s in reversed(stmt[1:]):
-            post = wp(s, post)
-        return post
-    elif stmt[0] == 'assume':
-        cond = expr_to_z3(stmt[1])
-        return Implies(cond, post)
-    elif stmt[0] == 'assert':
-        cond = expr_to_z3(stmt[1])
-        return And(cond, post)
-    elif stmt[0] == 'if':
-        test = expr_to_z3(stmt[1])
-        body = stmt[2]
-        orelse = stmt[3]
-        wp_body = wp(['seq'] + body, post)
-        wp_orelse = wp(['seq'] + orelse, post)
-        return And(Implies(test, wp_body), Implies(Not(test), wp_orelse))
-    elif stmt[0] == 'skip':
-        return post
-    elif stmt[0] == 'assign':
-        var = stmt[1]
-        expr = expr_to_z3(stmt[2])
-        return substitute(post, (Int(var), expr))
+    match stmt:
+        case ['seq', *rest]:
+            for s in reversed(rest):
+                post = wp(s, post)
+            return post
 
-    elif stmt[0] == 'invariant':
-        # invariants do not affect the weakest precondition
-        return BoolVal(True)
+        case ['assume', cond]:
+            cond_z3 = expr_to_z3(cond)
+            return Implies(cond_z3, post)
 
+        case ['assert', cond]:
+            cond_z3 = expr_to_z3(cond)
+            return And(cond_z3, post)
 
-    elif stmt[0] == 'while':
-        cond = expr_to_z3(stmt[1])
-        invariant = And(*list(map(expr_to_z3, stmt[3])))
-        body = stmt[2]
-        wp_body = wp(['seq'] + body, invariant)
-        return And(invariant, Implies(And(invariant, cond), wp_body), Implies(And(invariant, Not(cond)), post))
+        case ['if', test, body, orelse]:
+            test_z3 = expr_to_z3(test)
+            wp_body = wp(['seq'] + body, post)
+            wp_orelse = wp(['seq'] + orelse, post)
+            return And(Implies(test_z3, wp_body), Implies(Not(test_z3), wp_orelse))
 
-    
-    else:
-        raise NotImplementedError(stmt)
+        case ['skip']:
+            return post
+
+        case ['assign', var, expr]:
+            expr_z3 = expr_to_z3(expr)
+            return substitute(post, (Int(var), expr_z3))
+
+        case ['invariant', *rest]:
+            # invariants do not affect the weakest precondition
+            return BoolVal(True)
+
+        case ['while', cond, body, invariants]:
+            cond_z3 = expr_to_z3(cond)
+            invariant = And(*list(map(expr_to_z3, invariants)))
+            wp_body = wp(['seq'] + body, invariant)
+            return And(invariant, Implies(And(invariant, cond_z3), wp_body), Implies(And(invariant, Not(cond_z3)), post))
+
+        case _:
+            raise NotImplementedError(stmt)
 
 def expr_to_z3(expr):
-    if expr[0] == 'const':
-        if isinstance(expr[1], bool):
-            return BoolVal(expr[1])
-        else:
-            return IntVal(expr[1])
-    elif expr[0] == 'var':
-        return Int(expr[1])
-    elif expr[0] == '<':
-        return expr_to_z3(expr[1]) < expr_to_z3(expr[2])
-    elif expr[0] == '<=':
-        return expr_to_z3(expr[1]) <= expr_to_z3(expr[2])
-    elif expr[0] == '>':
-        return expr_to_z3(expr[1]) > expr_to_z3(expr[2])
-    elif expr[0] == '>=':
-        return expr_to_z3(expr[1]) >= expr_to_z3(expr[2])
-    elif expr[0] == '==':
-        return expr_to_z3(expr[1]) == expr_to_z3(expr[2])
-    elif expr[0] == '!=':
-        return expr_to_z3(expr[1]) != expr_to_z3(expr[2])
-    elif expr[0] == '+':
-        return expr_to_z3(expr[1]) + expr_to_z3(expr[2])
-    elif expr[0] == '-':
-        if len(expr) == 2:
-            return -expr_to_z3(expr[1])
-        else:
-            return expr_to_z3(expr[1]) - expr_to_z3(expr[2])
-    elif expr[0] == '*':
-        return expr_to_z3(expr[1]) * expr_to_z3(expr[2])
-    elif expr[0] == '/':
-        return expr_to_z3(expr[1]) / expr_to_z3(expr[2])
-    elif expr[0] == '==':
-        return expr_to_z3(expr[1]) == expr_to_z3(expr[2])
-    else:
-        raise NotImplementedError(expr)
+    match expr:
+        case ['const', v]:
+            if isinstance(v, bool):
+                return BoolVal(v)
+            else:
+                return IntVal(v)
 
+        case ['var', name]:
+            return Int(name)
+
+        case ['<', a, b]:
+            return expr_to_z3(a) < expr_to_z3(b)
+        case ['<=', a, b]:
+            return expr_to_z3(a) <= expr_to_z3(b)
+        case ['>', a, b]:
+            return expr_to_z3(a) > expr_to_z3(b)
+        case ['>=', a, b]:
+            return expr_to_z3(a) >= expr_to_z3(b)
+        case ['==', a, b]:
+            return expr_to_z3(a) == expr_to_z3(b)
+        case ['!=', a, b]:
+            return expr_to_z3(a) != expr_to_z3(b)
+
+        case ['+', a, b]:
+            return expr_to_z3(a) + expr_to_z3(b)
+
+        case ['-', x] :
+            # unary negation
+            return -expr_to_z3(x)
+        case ['-', a, b]:
+            return expr_to_z3(a) - expr_to_z3(b)
+
+        case ['*', a, b]:
+            return expr_to_z3(a) * expr_to_z3(b)
+        case ['/', a, b]:
+            return expr_to_z3(a) / expr_to_z3(b)
+
+        case _:
+            raise NotImplementedError(expr)
 
 
 def prove(stmt):
