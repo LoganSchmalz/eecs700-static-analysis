@@ -89,10 +89,16 @@ class WhilePyVisitor(ast.NodeVisitor):
     def visit_Assign(self, node):
         assert len(node.targets) == 1
         target = node.targets[0]
-        assert isinstance(target, ast.Name)
-        var = target.id
         value = self.visit(node.value)
-        return ['assign', var, value]
+        if isinstance(target, ast.Name):
+            var = target.id
+            return ['assign', var, value]
+        elif isinstance(target, ast.Subscript):
+            arr = self.visit(target.value)
+            index = self.visit(target.slice)
+            return ['tastore', arr, index, value]
+        else:
+            raise NotImplementedError(ast.dump(target))
     
     def visit_Pass(self, node):
         return ['skip']
@@ -116,6 +122,25 @@ class WhilePyVisitor(ast.NodeVisitor):
     
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))
+    
+    def visit_Subscript(self, node):
+        # If the array being subscripted is a plain name, make it an 'arrvar' node
+        if isinstance(node.value, ast.Name):
+            arr = ['arrvar', node.value.id]
+        else:
+            arr = self.visit(node.value)
+        index = self.visit(node.slice)
+        return ['select', arr, index]
+
+    def visit_List(self, node):
+        # list literal -> ['array', elem1, elem2, ...]
+        elems = [self.visit(elt) for elt in node.elts]
+        return ['array'] + elems
+
+    def visit_Tuple(self, node):
+        # tuple literal -> treat similarly to list
+        elems = [self.visit(elt) for elt in node.elts]
+        return ['array'] + elems
 
 # tree = py_ast("parse_example.py")
 # visitor = WhilePyVisitor()
