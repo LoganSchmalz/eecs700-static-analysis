@@ -302,6 +302,16 @@ def expr_to_z3(expr):
 
 
 def prove(stmt):
+    # preprocess functions
+    i = 0
+    while i < len(stmt):
+        if stmt[i][0] == 'proc':
+            post = BoolVal(True)
+            pre = wp(stmt[i], post)
+            del stmt[i]
+        else:
+            i += 1
+
     post = BoolVal(True)
     pre = wp(stmt, post)
     print(pre)
