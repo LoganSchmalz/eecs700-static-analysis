@@ -116,8 +116,9 @@ class WhilePyVisitor(ast.NodeVisitor):
             return ['assign', var, value]
         elif isinstance(target, ast.Subscript):
             arr = self.visit(target.value)
+            arr = ['arrvar', arr[1]] # should this override be here?
             index = self.visit(target.slice)
-            return ['tastore', arr, index, value]
+            return ['store', arr, index, value]
         else:
             raise NotImplementedError(ast.dump(target))
     
@@ -175,10 +176,9 @@ class WhilePyVisitor(ast.NodeVisitor):
         raise NotImplementedError(ast.dump(node))
     
     def visit_Subscript(self, node):
-        # If the array being subscripted is a plain name, make it an 'arrvar' node
         if isinstance(node.value, ast.Name):
             arr = ['arrvar', node.value.id]
-        else:
+        else: # array literal
             arr = self.visit(node.value)
         index = self.visit(node.slice)
         return ['select', arr, index]
