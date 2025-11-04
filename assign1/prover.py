@@ -148,7 +148,7 @@ def wp(stmt, post):
             ret_z3 = expr_to_z3(ret_expr)
             return substitute(post, (Int('ret'), ret_z3))
 
-        case ['tastore', arr, idx, val]:
+        case ['store', arr, idx, val]:
             arr_z3 = expr_to_z3(arr)
             idx_z3 = expr_to_z3(idx)
             val_z3 = expr_to_z3(val)
