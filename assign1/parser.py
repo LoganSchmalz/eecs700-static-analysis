@@ -31,6 +31,9 @@ class WhilePyVisitor(ast.NodeVisitor):
             elif node.func.id == 'ensures':
                 assert len(node.args) == 1
                 return ['ensures', self.visit(node.args[0])]
+            elif node.func.id == 'modifies':
+                assert len(node.args) == 1
+                return ['modifies', self.visit(node.args[0])]
             elif node.func.id == 'len':
                 assert len(node.args) == 1
                 return ['len', self.visit(node.args[0])]
@@ -38,6 +41,9 @@ class WhilePyVisitor(ast.NodeVisitor):
                 # old(x) -> ['old', <expr>]
                 assert len(node.args) == 1
                 return ['old', self.visit(node.args[0])]
+            else:
+                print(node.func.id, list(map(self.visit, node.args)))
+                return ['call', node.func.id, list(map(self.visit, node.args))]
         raise NotImplementedError(ast.dump(node))
     
     def visit_Const(self, node):
@@ -148,6 +154,7 @@ class WhilePyVisitor(ast.NodeVisitor):
 
         requires = []
         ensures = []
+        modifies = []
         body = list(map(self.visit, node.body))
 
         for stmt in node.body:
@@ -162,9 +169,12 @@ class WhilePyVisitor(ast.NodeVisitor):
                     assert len(stmt.value.args) == 1
                     ensures.append(self.visit(stmt.value.args[0]))
                     continue
+                if fid == 'modifies':
+                    assert len(stmt.value.args) == 1
+                    modifies.append(self.visit(stmt.value.args[0])[1])
+                    continue
 
-        # return shape: ['proc', name, params, requires_list, ensures_list, body]
-        return ['proc', name, params, requires, ensures, body]
+        return ['proc', name, params, body, requires, ensures, modifies]
 
     def visit_Return(self, node):
         # represent return as ['return', value] (value may be None)
