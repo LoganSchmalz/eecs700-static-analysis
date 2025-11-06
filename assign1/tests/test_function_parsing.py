@@ -32,7 +32,7 @@ assert(y == 3)
 # assert(x == 3)
 x = incr(y)
 # assert(__ret_incr_1 == 2)
-assert(y == 5)
+assert(y == 4)
 # test(4)
 # assert(ret == 10)
 pass
