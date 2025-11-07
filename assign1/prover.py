@@ -11,8 +11,18 @@ _procedures = {}
 # should not be reported as correct even if the global VC holds
 _failed_procedures = []
 
-_call_counter = 0
-_loop_counter = 0
+_ssa_versions = {}
+_ssa_map = {}
+
+def get_ssa(name):
+    return _ssa_map.get(name, f"__ssa_{name}_0")
+
+def fresh_ssa(name):
+    ver = _ssa_versions.get(name, 0)
+    ver = ver + 1
+    _ssa_versions[name] = ver
+    _ssa_map[name] = f"__ssa_{name}_{ver}"
+    return _ssa_map[name]
 
 def _resolve_array_name(name):
     seen = set()
@@ -49,6 +59,23 @@ def _replace_vars_mapping(node, mapping):
         name = node[1]
         return ['var', mapping.get(name, name)]
     return [node[0]] + [_replace_vars_mapping(child, mapping) for child in node[1:]]
+
+def _find_vars_in_assurances(node):
+    """Recursively find all variable names that occur as ['var', name] in the AST list."""
+    vars_found = set()
+
+    if not isinstance(node, list):
+        return vars_found
+    if len(node) == 0:
+        return vars_found
+    
+    if node[0] == 'var' and len(node) > 1:
+        vars_found.add(node[1])
+        return vars_found
+    
+    for child in node[1:]:
+        vars_found |= _find_vars_in_assurances(child)
+    return vars_found
 
 def _ensure_len_symbol(name):
     """Return the canonical z3.Int symbol for length of `name` (create if needed)."""
@@ -88,6 +115,7 @@ def find_modified_vars(stmt):
 
         case ['assign', var, expr]:
             modified.add(var)
+            modified |= find_modified_vars(expr)
             # also handle array element assignments (e.g., ['assign', ['arrstore', 'A', i], e])
             if isinstance(var, list) and var and var[0] == 'arrstore':
                 modified.add(var[1])
@@ -114,9 +142,6 @@ def find_modified_vars(stmt):
             return modified
 
 def wp(stmt, post):
-    global _call_counter
-    global _loop_counter
-
     match stmt:
         case ['seq', *rest]:
             for s in reversed(rest):
@@ -154,7 +179,11 @@ def wp(stmt, post):
         case ['assign', var, expr]:
             if isinstance(expr, list) and expr and (expr[0] == 'call'):
                 # return wp(expr, substitute(post, (Int(var), Int(f"__ret_{expr[1]}_{_call_counter+1}"))))
-                return wp(expr, substitute(post, (Int(f"__ret_{expr[1]}_{_call_counter+1}"), Int(var))))
+                old_var = get_ssa(var)
+                fresh = fresh_ssa(var) # if var appears on rhs, this will fix issues
+                print("proc call", old_var, fresh)
+                # return wp(expr, substitute(post, (Int(old_var), Int(fresh_ssa("ret")))))
+                return substitute(wp(expr, post), (Int(get_ssa("ret")), Int(old_var)))
                 # cannot do the following way because this can lead to variable having multiple different values
                 # return substitute(wp(expr, post), (Int(f"__ret_{expr[1]}_{_call_counter}"), Int(var)))
                 # return substitute(wp(expr, post), (Int(var), Int(f"__ret_{expr[1]}_{_call_counter}")))
@@ -221,17 +250,25 @@ def wp(stmt, post):
                     _array_vars.discard(var)
                     _array_lengths.pop(var, None)
                     _array_aliases.pop(var, None)
-                return substitute(post, (Int(var), expr_z3))
+
+                old_var = get_ssa(var)
+                fresh_var = fresh_ssa(var)
+                print(old_var, fresh_var)
+
+                # if the variable appeared on rhs, we want to substitute it for fresh names
+                expr_z3 = substitute(expr_z3, (Int(old_var), Int(fresh_var)))
+
+                return substitute(post, (Int(old_var), expr_z3))
 
         case ['return', *rest]:
             # On return, bind the special symbol `ret` to the returned expression
             # in the postcondition so `ensures` can refer to the return value.
             if len(rest) == 0:
                 # no return value -> use 0 as a sentinel
-                return substitute(post, (Int('ret'), IntVal(0)))
+                return substitute(post, (Int(get_ssa('ret')), IntVal(0)))
             ret_expr = rest[0]
             ret_z3 = expr_to_z3(ret_expr)
-            return substitute(post, (Int('ret'), ret_z3))
+            return substitute(post, (Int(get_ssa('ret')), ret_z3))
 
         case ['store', arr, idx, val]:
             arr_z3 = expr_to_z3(arr)
@@ -270,21 +307,22 @@ def wp(stmt, post):
             # body should establish ensures. We model initial parameter values
             # as special variables named __old_<p>_<proc> and replace old(p)
             # occurrences in ensures with those symbols.
-            # 1) build requires_z3 over initial values
-            req_conjs = [expr_to_z3(r) for r in requires]
-            requires_z3 = And(*req_conjs) if req_conjs else BoolVal(True)
 
-            # 2) build ensures_z3 where old(p) -> __old_p_func
+            # 1) build ensures_z3 where old(p) -> __old_p_func
             ens_conjs = [expr_to_z3(e) for e in ensures]
             ensures_z3 = And(*ens_conjs) if ens_conjs else BoolVal(True)
             
-            # 3) compute WP of the procedure body w.r.t. ensures
+            # 2) compute WP of the procedure body w.r.t. ensures
             pre_for_body = wp(['seq'] + body, ensures_z3)
+
+            # 3) build requires_z3 over initial values
+            req_conjs = [expr_to_z3(r) for r in requires]
+            requires_z3 = And(*req_conjs) if req_conjs else BoolVal(True)
+            # parameters at function entry equal the __old_<p>_<func> symbols
+            entry_eqs = [Int(get_ssa(p)) == Int(f"__old_{p}") for p in params]
 
             # 4) check that requires => pre_for_body is valid
             solver = Solver()
-            # parameters at function entry equal the __old_<p>_<func> symbols
-            entry_eqs = [Int(p) == Int(f"__old_{p}") for p in params]
             solver.add(requires_z3)
             solver.add(*entry_eqs)
             solver.add(Not(pre_for_body))
@@ -303,12 +341,41 @@ def wp(stmt, post):
             cond_z3 = expr_to_z3(cond)
             invariant = And(*list(map(expr_to_z3, invariants))) if invariants else BoolVal(True)
             body = ["seq"] + body
-            modified = find_modified_vars(body)
-            _loop_counter += 1
-            mod_sub = [(Int(f"{m}"), Int(f"__modified_{m}_{_loop_counter}")) for m in modified]
+            
+            assurance_vars = set()
+            for i in invariants:
+                assurance_vars |= _find_vars_in_assurances(i)
+            print("assurance vars", assurance_vars)
+
+            old_vars = [Int(get_ssa(m)) for m in assurance_vars]
             wp_body = wp(body, invariant)
-            # return And(invariant, Implies(And(invariant, cond_z3), wp_body), Implies(And(invariant, Not(cond_z3)), post))
-            return And(invariant, substitute(Implies(And(invariant, cond_z3), wp_body), *mod_sub), substitute(Implies(And(invariant, Not(cond_z3)), post), *mod_sub))
+            # print("wp_body", wp_body)
+            mod_vars = [Int(get_ssa(m)) for m in assurance_vars]
+            
+            
+            print("invariant", invariant)
+            print("old_vars", old_vars)
+            print("mod_vars", mod_vars)
+            old_new = [sub for sub in zip(old_vars, mod_vars)]
+            new_old = [sub for sub in zip(mod_vars, old_vars)]
+            
+            for m in assurance_vars:
+                fresh_ssa(m)
+
+            # cond_true = substitute(Implies(And(invariant, cond_z3), wp_body), *old_new)
+            new_invariant = substitute(invariant, *old_new)
+            new_cond_z3 = substitute(cond_z3, *old_new)
+            cond_true = Implies(And(new_invariant, new_cond_z3), wp_body)
+            print("cond_true", cond_true)
+            # cond_true = Implies(And(invariant, cond_z3), substitute(wp_body, *new_old))
+            # cond_true = substitute(cond_true, *[sub for sub in zip(old_vars, mod_vars)])
+            # print("cond_true", cond_true)
+            # print("wp_body", wp_body)
+            cond_false = Implies(And(invariant, Not(cond_z3)), post)
+            preinvariant = And(*list(map(expr_to_z3, invariants))) if invariants else BoolVal(True)
+            # print("preinvariant", preinvariant)
+            return And(preinvariant, cond_true, cond_false)
+            # return And(invariant, substitute(Implies(And(invariant, cond_z3), wp_body), *mod_sub), substitute(Implies(And(invariant, Not(cond_z3)), post), *mod_sub))
         
         case ['call', proc, args]:
             procedure = _procedures[proc]
@@ -319,43 +386,49 @@ def wp(stmt, post):
 
             # substitute params for args in order
             param_ast_map = {p: a for p, a in zip(params, args)}
-
+            
             # replace all parameters in requires with their arguments 
-            param_substitutions = [(Int(p), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
+            param_substitutions = [(Int(get_ssa(p)), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
             requires_inst_z3_list = [substitute(expr_to_z3(r), *param_substitutions) for r in requires]
             requires_inst = And(*requires_inst_z3_list) if requires_inst_z3_list else BoolVal(True)
 
-            # give params/ret fresh names 
-            _call_counter += 1
-            fresh_names = {}
-            for p, a in zip(params, args):
-                fresh_names[p] = ['var', f"__param_{proc}_{_call_counter}_{p}"]
-            fresh_names['ret'] = ['var', f"__ret_{proc}_{_call_counter}"]
+            # give params fresh names
+            fresh_ssa("ret")
+            for p in params:
+                fresh_ssa(p)
+            
             ensures_inst_z3_list = [expr_to_z3(e) for e in ensures]
-            old_substitutions = [(Int(f"__old_{p}"), Int(f"__old_{proc}_{_call_counter}_{p}")) for (p, a) in param_ast_map.items()]
-            fresh_substitutions = [(Int(p), expr_to_z3(a)) for (p, a) in fresh_names.items()]
-            ensures_inst_z3_list = [substitute(e, *old_substitutions, *fresh_substitutions) for e in ensures_inst_z3_list]
             ensures_inst = And(*ensures_inst_z3_list) if ensures_inst_z3_list else BoolVal(True)
+            # unmodified variables should remain the same
+            unmodified_vars = []
+            for p, a in param_ast_map.items():
+                if p not in modifies:
+                    unmodified_vars.append(Int(f"__old_{p}") == expr_to_z3(a))
+            ensures_inst = And(ensures_inst, *unmodified_vars) if unmodified_vars else ensures_inst
+            # replace all old parameters in ensures with their arguments
+            old_substitutions = [(Int(f"__old_{p}"), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
+            ensures_inst = substitute(ensures_inst, *old_substitutions)
 
             # any variable that gets modified needs to be substituted in the post condition
             modifies_substitution = []
             for var in modifies:
                 sub = param_ast_map[var]
                 if isinstance(sub, list) and sub and sub[0] == 'var':
-                    arg = expr_to_z3(param_ast_map[var])
-                    fresh = expr_to_z3(fresh_names[var])
-                    modifies_substitution.append((arg,fresh))
-            post = substitute(post, *modifies_substitution)
-            # unmodified variables should remain the same
-            unmodified_vars = []
-            for p, a in param_ast_map.items():
-                if p not in modifies:
-                    unmodified_vars.append(Int(f"__old_{proc}_{_call_counter}_{p}") == expr_to_z3(a))
-            ensures_inst = And(ensures_inst, *unmodified_vars) if unmodified_vars else ensures_inst
-
-            # at the end replace any instances of old with the arg input
-            old_substitutions = [(Int(f"__old_{proc}_{_call_counter}_{p}"), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
-            ensures_inst = substitute(ensures_inst, *old_substitutions)
+                    arg = expr_to_z3(param_ast_map[var]) # todo: this code is bad
+                    # new_arg = fresh_ssa(param_ast_map[var][1])
+                    # fresh_ssa(param_ast_map[var][1])
+                    # modifies_substitution.append((arg, Int(new_arg)))
+                    # modifies_substitution.append((arg, Int(get_ssa(var))))
+                    new_arg = fresh_ssa(param_ast_map[var][1])
+                    modifies_substitution.append((Int(get_ssa(var)), arg))
+                    modifies_substitution.append((arg, Int(new_arg)))
+            print("modifies_sub call", modifies_substitution)
+            print("post", post)
+            # post = substitute(post, *modifies_substitution)
+            requires_inst = substitute(requires_inst, *modifies_substitution)
+            ensures_inst = substitute(ensures_inst, *modifies_substitution)
+            # print("post2", post2)
+            # assert(str(post) == str(post2))
 
             return And(requires_inst, Implies(ensures_inst, post))
 
@@ -374,7 +447,8 @@ def expr_to_z3(expr):
             if name in _array_vars:
                 canon = _resolve_array_name(name)
                 return Array(canon, IntSort(), IntSort())
-            return Int(name)
+            # return Int(name)
+            return Int(get_ssa(name))
         
         case ['old', [ty, name]]:
             return Int(f"__old_{name}")

@@ -24,15 +24,17 @@ def test(v):
 #     return v
 
 
-# top-level no-op so module isn't empty
+x = 3
 y = 2
-y = incr(y)
+x = incr(y)
 assert(y == 3)
 # assert(__ret_incr_2 == 3)
 # assert(x == 3)
-x = incr(y)
+# x = incr(y)
 # assert(__ret_incr_1 == 2)
-assert(y == 4)
+# assert(y == 4)
+# z = test(4)
+# assert(z == 11)
 # test(4)
+# assert(x == 4)
 # assert(ret == 10)
-pass
