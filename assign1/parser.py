@@ -122,7 +122,7 @@ class WhilePyVisitor(ast.NodeVisitor):
             return ['assign', var, value]
         elif isinstance(target, ast.Subscript):
             arr = self.visit(target.value)
-            arr = ['arrvar', arr[1]] # should this override be here?
+            # arr = ['arrvar', arr[1]] # should this override be here?
             index = self.visit(target.slice)
             return ['store', arr, index, value]
         else:
@@ -187,7 +187,8 @@ class WhilePyVisitor(ast.NodeVisitor):
     
     def visit_Subscript(self, node):
         if isinstance(node.value, ast.Name):
-            arr = ['arrvar', node.value.id]
+            # arr = ['arrvar', node.value.id]
+            arr = ['var', node.value.id]
         else: # array literal
             arr = self.visit(node.value)
         index = self.visit(node.slice)

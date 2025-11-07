@@ -2,8 +2,6 @@ from z3 import *
 # ruff: noqa: F403
 # ruff: noqa: F405
 
-# track variable names that should be treated as arrays
-_array_vars = set()
 # _array_lengths: name -> z3.Int('len_<name>') canonical symbol (created on-demand) OR an int for concrete lengths
 _array_lengths = {}
 _array_aliases = {}
@@ -15,6 +13,9 @@ _failed_procedures = []
 
 _ssa_versions = {}
 _ssa_map = {}
+
+def is_array_var(name: str):
+    return name and name[0].isupper()
 
 def get_ssa(name):
     return _ssa_map.get(name, f"__ssa_{name}_0")
@@ -35,32 +36,17 @@ def _resolve_array_name(name):
     return cur
 
 def _normalize_post_arrays(post):
-    """Rewrite any Array(var,...) occurrences in `post` to use the canonical name.
-    Returns the rewritten post. Uses the current _array_aliases mapping.
     """
-    # collect substitutions to do (avoid modifying _array_vars during iteration)
+    Rewrite any Array(var, ...) occurrences to use the canonical name
+    according to _array_aliases.
+    """
     subs = []
-    for name in list(_array_vars):
-        canon = _resolve_array_name(name)
+    for name, canon in _array_aliases.items():
         if canon != name:
             subs.append((Array(name, IntSort(), IntSort()), Array(canon, IntSort(), IntSort())))
     if not subs:
         return post
-    # perform all substitutions at once
     return substitute(post, *subs)
-
-def _replace_vars_mapping(node, mapping):
-    """Replace occurrences of ['var', name] according to mapping dict {name: newname}.
-    Works recursively on the AST lists.
-    """
-    if not isinstance(node, list):
-        return node
-    if len(node) == 0:
-        return node
-    if node[0] == 'var':
-        name = node[1]
-        return ['var', mapping.get(name, name)]
-    return [node[0]] + [_replace_vars_mapping(child, mapping) for child in node[1:]]
 
 def _find_vars_in_assurances(node):
     """Recursively find all variable names that occur as ['var', name] in the AST list."""
@@ -185,21 +171,7 @@ def wp(stmt, post):
                 print("proc call", old_var, fresh)
                 return substitute(wp(expr, post), (Int(get_ssa("ret")), Int(old_var)))
 
-            is_array_assign = False
-            if isinstance(expr, list) and expr and (expr[0] == 'array' or expr[0] == 'arrvar'):
-                is_array_assign = True
-            if isinstance(expr, list) and expr and expr[0] == 'var' and (expr[1] in _array_vars or var in _array_vars):
-                # print("test")
-                is_array_assign = True
-            # print(expr)
-            # if isinstance(expr, list) and expr and expr[0] == 'var':
-            #     print(expr[1] in _array_vars)
-
-            # record length info for array assignments
-            if is_array_assign:
-                # mark var as an array name
-                _array_vars.add(var)
-
+            if is_array_var(var):
                 # RHS is a literal array -> concrete length known
                 if isinstance(expr, list) and expr and expr[0] == 'array':
                     expr_z3 = expr_to_z3(expr)
@@ -223,7 +195,6 @@ def wp(stmt, post):
                 elif isinstance(expr, list) and expr and expr[0] in ('var', 'arrvar'):
                     expr_z3 = expr_to_z3(expr)
                     src_name = expr[1]
-                    _array_vars.add(src_name)
                     if src_name in _array_lengths:
                         _array_lengths[var] = _array_lengths[src_name]
                     canon_src = _resolve_array_name(src_name)
@@ -244,8 +215,7 @@ def wp(stmt, post):
 
             else:
                 # scalar assignment: remove any prior array metadata for this var
-                if var in _array_vars:
-                    _array_vars.discard(var)
+                if is_array_var(var):
                     _array_lengths.pop(var, None)
                     _array_aliases.pop(var, None)
 
@@ -274,7 +244,6 @@ def wp(stmt, post):
             if isinstance(arr, list) and arr and arr[0] == 'arrvar':
                 print("true")
                 arr_name = arr[1]
-                _array_vars.add(arr_name)
                 canon = _resolve_array_name(arr_name)
                 arr_z3 = Array(canon, IntSort(), IntSort())
             else:
@@ -414,7 +383,7 @@ def expr_to_z3(expr):
                 return IntVal(v)
 
         case ['var', name]:
-            if name in _array_vars:
+            if is_array_var(name):
                 canon = _resolve_array_name(name)
                 return Array(canon, IntSort(), IntSort())
             # return Int(name)
@@ -422,11 +391,6 @@ def expr_to_z3(expr):
         
         case ['old', [_ty, name]]:
             return Int(f"__old_{name}")
-
-        case ['arrvar', name]:
-            _array_vars.add(name)
-            canon = _resolve_array_name(name)
-            return Array(canon, IntSort(), IntSort())
 
         case ['array', *elems]:
             arr = K(IntSort(), IntVal(0))
