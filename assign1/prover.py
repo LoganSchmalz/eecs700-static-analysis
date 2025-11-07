@@ -1,4 +1,6 @@
 from z3 import *
+# ruff: noqa: F403
+# ruff: noqa: F405
 
 # track variable names that should be treated as arrays
 _array_vars = set()
@@ -121,19 +123,19 @@ def find_modified_vars(stmt):
                 modified.add(var[1])
             return modified
 
-        case ['call', proc, args]:
+        case ['call', proc, _args]:
             # use modifies clause of the procedure if available
             if proc in _procedures:
                 modset = set(_procedures[proc].get('modifies', []))
                 modified |= modset
             return modified
 
-        case ['if', cond, then_branch, else_branch]:
+        case ['if', _cond, then_branch, else_branch]:
             modified |= find_modified_vars(then_branch)
             modified |= find_modified_vars(else_branch)
             return modified
 
-        case ['while', cond, invariant, body]:
+        case ['while', _cond, _invariant, body]:
             modified |= find_modified_vars(body)
             return modified
 
@@ -418,7 +420,7 @@ def expr_to_z3(expr):
             # return Int(name)
             return Int(get_ssa(name))
         
-        case ['old', [ty, name]]:
+        case ['old', [_ty, name]]:
             return Int(f"__old_{name}")
 
         case ['arrvar', name]:
