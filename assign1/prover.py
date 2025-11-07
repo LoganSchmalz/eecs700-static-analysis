@@ -454,6 +454,9 @@ def expr_to_z3(expr):
         case ['and', *args]:
             # logical conjunction of multiple boolean sub-expressions
             return And(*[expr_to_z3(a) for a in args])
+        
+        case ['or', *args]:
+            return Or(*[expr_to_z3(a) for a in args])
 
         case _:
             raise NotImplementedError(expr)
