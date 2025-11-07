@@ -183,8 +183,6 @@ def wp(stmt, post):
                 print("proc call", old_var, fresh)
                 return substitute(wp(expr, post), (Int(get_ssa("ret")), Int(old_var)))
 
-            expr_z3 = expr_to_z3(expr)
-
             is_array_assign = False
             if isinstance(expr, list) and expr and (expr[0] == 'array' or expr[0] == 'arrvar'):
                 is_array_assign = True
@@ -202,6 +200,7 @@ def wp(stmt, post):
 
                 # RHS is a literal array -> concrete length known
                 if isinstance(expr, list) and expr and expr[0] == 'array':
+                    expr_z3 = expr_to_z3(expr)
                     elems = expr[1:]
                     concrete_len = len(elems)
 
@@ -220,6 +219,7 @@ def wp(stmt, post):
 
                 # RHS is a named array variable (alias): copy whatever length info exists (int or symbol)
                 elif isinstance(expr, list) and expr and expr[0] in ('var', 'arrvar'):
+                    expr_z3 = expr_to_z3(expr)
                     src_name = expr[1]
                     _array_vars.add(src_name)
                     if src_name in _array_lengths:
@@ -231,6 +231,7 @@ def wp(stmt, post):
                 
                 # other array expression (e.g., expression that is already an array term): just substitute
                 else:
+                    expr_z3 = expr_to_z3(expr)
                     # ensure there's a canonical symbol for var (symbolic) if needed
                     _array_lengths.setdefault(var, _ensure_len_symbol(var))
                     _array_aliases.pop(var, None)
@@ -247,11 +248,10 @@ def wp(stmt, post):
                     _array_aliases.pop(var, None)
 
                 old_var = get_ssa(var)
-                fresh_var = fresh_ssa(var)
-                print(old_var, fresh_var)
+                fresh_ssa(var)
 
-                # if the variable appeared on rhs, we want to substitute it for fresh names
-                expr_z3 = substitute(expr_z3, (Int(old_var), Int(fresh_var)))
+                # we want to calculate expr after giving assigned variable a fresh name in case it appears on rhs
+                expr_z3 = expr_to_z3(expr)
 
                 return substitute(post, (Int(old_var), expr_z3))
 
@@ -365,38 +365,36 @@ def wp(stmt, post):
 
             # substitute params for args in order
             param_ast_map = {p: a for p, a in zip(params, args)}
+            # give ret fresh name in case they are ignored we don't want them to conflict
+            fresh_ssa("ret")
+            # give params fresh names, e.g. necessary for foo(x); foo(y) if ensures references a parameter
+            for p in params:
+                fresh_ssa(p)
             
             # replace all parameters in requires with their arguments 
             param_substitutions = [(Int(get_ssa(p)), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
             requires_inst_z3_list = [substitute(expr_to_z3(r), *param_substitutions) for r in requires]
             requires_inst = And(*requires_inst_z3_list) if requires_inst_z3_list else BoolVal(True)
-
-            # give params fresh names
-            fresh_ssa("ret")
-            for p in params:
-                fresh_ssa(p)
             
             ensures_inst_z3_list = [expr_to_z3(e) for e in ensures]
             ensures_inst = And(*ensures_inst_z3_list) if ensures_inst_z3_list else BoolVal(True)
-            # unmodified variables should remain the same
-            unmodified_vars = []
-            for p, a in param_ast_map.items():
-                if p not in modifies:
-                    unmodified_vars.append(Int(f"__old_{p}") == expr_to_z3(a))
-            ensures_inst = And(ensures_inst, *unmodified_vars) if unmodified_vars else ensures_inst
-            # replace all old parameters in ensures with their arguments
+            # replace old(param) with argument
             old_substitutions = [(Int(f"__old_{p}"), expr_to_z3(a)) for (p, a) in param_ast_map.items()]
             ensures_inst = substitute(ensures_inst, *old_substitutions)
 
-            # any variable that gets modified needs to be substituted in the post condition
+            # any variable that gets modified needs a fresh name
             modifies_substitution = []
             for var in modifies:
                 sub = param_ast_map[var]
-                if isinstance(sub, list) and sub and sub[0] == 'var':
-                    arg = expr_to_z3(param_ast_map[var]) # todo: this code is bad
-                    new_arg = fresh_ssa(param_ast_map[var][1])
-                    modifies_substitution.append((Int(get_ssa(var)), arg))
-                    modifies_substitution.append((arg, Int(new_arg)))
+                if not (isinstance(sub, list) and sub and sub[0] == 'var'):
+                    continue
+
+                arg = expr_to_z3(param_ast_map[var]) # todo: this code is bad
+                new_arg = fresh_ssa(param_ast_map[var][1])
+                # we need to replace parameters with args
+                modifies_substitution.append((Int(get_ssa(var)), arg))
+                # we need to replace args with fresh names since they are modified after this point in the program
+                modifies_substitution.append((arg, Int(new_arg)))
             requires_inst = substitute(requires_inst, *modifies_substitution)
             ensures_inst = substitute(ensures_inst, *modifies_substitution)
 
