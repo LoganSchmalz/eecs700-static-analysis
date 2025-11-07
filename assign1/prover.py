@@ -178,15 +178,10 @@ def wp(stmt, post):
 
         case ['assign', var, expr]:
             if isinstance(expr, list) and expr and (expr[0] == 'call'):
-                # return wp(expr, substitute(post, (Int(var), Int(f"__ret_{expr[1]}_{_call_counter+1}"))))
                 old_var = get_ssa(var)
                 fresh = fresh_ssa(var) # if var appears on rhs, this will fix issues
                 print("proc call", old_var, fresh)
-                # return wp(expr, substitute(post, (Int(old_var), Int(fresh_ssa("ret")))))
                 return substitute(wp(expr, post), (Int(get_ssa("ret")), Int(old_var)))
-                # cannot do the following way because this can lead to variable having multiple different values
-                # return substitute(wp(expr, post), (Int(f"__ret_{expr[1]}_{_call_counter}"), Int(var)))
-                # return substitute(wp(expr, post), (Int(var), Int(f"__ret_{expr[1]}_{_call_counter}")))
 
             expr_z3 = expr_to_z3(expr)
 
@@ -349,33 +344,17 @@ def wp(stmt, post):
 
             old_vars = [Int(get_ssa(m)) for m in assurance_vars]
             wp_body = wp(body, invariant)
-            # print("wp_body", wp_body)
             mod_vars = [Int(get_ssa(m)) for m in assurance_vars]
-            
-            
-            print("invariant", invariant)
-            print("old_vars", old_vars)
-            print("mod_vars", mod_vars)
             old_new = [sub for sub in zip(old_vars, mod_vars)]
-            new_old = [sub for sub in zip(mod_vars, old_vars)]
-            
             for m in assurance_vars:
                 fresh_ssa(m)
 
-            # cond_true = substitute(Implies(And(invariant, cond_z3), wp_body), *old_new)
             new_invariant = substitute(invariant, *old_new)
             new_cond_z3 = substitute(cond_z3, *old_new)
             cond_true = Implies(And(new_invariant, new_cond_z3), wp_body)
-            print("cond_true", cond_true)
-            # cond_true = Implies(And(invariant, cond_z3), substitute(wp_body, *new_old))
-            # cond_true = substitute(cond_true, *[sub for sub in zip(old_vars, mod_vars)])
-            # print("cond_true", cond_true)
-            # print("wp_body", wp_body)
             cond_false = Implies(And(invariant, Not(cond_z3)), post)
             preinvariant = And(*list(map(expr_to_z3, invariants))) if invariants else BoolVal(True)
-            # print("preinvariant", preinvariant)
             return And(preinvariant, cond_true, cond_false)
-            # return And(invariant, substitute(Implies(And(invariant, cond_z3), wp_body), *mod_sub), substitute(Implies(And(invariant, Not(cond_z3)), post), *mod_sub))
         
         case ['call', proc, args]:
             procedure = _procedures[proc]
@@ -415,20 +394,11 @@ def wp(stmt, post):
                 sub = param_ast_map[var]
                 if isinstance(sub, list) and sub and sub[0] == 'var':
                     arg = expr_to_z3(param_ast_map[var]) # todo: this code is bad
-                    # new_arg = fresh_ssa(param_ast_map[var][1])
-                    # fresh_ssa(param_ast_map[var][1])
-                    # modifies_substitution.append((arg, Int(new_arg)))
-                    # modifies_substitution.append((arg, Int(get_ssa(var))))
                     new_arg = fresh_ssa(param_ast_map[var][1])
                     modifies_substitution.append((Int(get_ssa(var)), arg))
                     modifies_substitution.append((arg, Int(new_arg)))
-            print("modifies_sub call", modifies_substitution)
-            print("post", post)
-            # post = substitute(post, *modifies_substitution)
             requires_inst = substitute(requires_inst, *modifies_substitution)
             ensures_inst = substitute(ensures_inst, *modifies_substitution)
-            # print("post2", post2)
-            # assert(str(post) == str(post2))
 
             return And(requires_inst, Implies(ensures_inst, post))
 
