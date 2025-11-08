@@ -1,0 +1,102 @@
+\documentclass[letterpaper, 12pt]{article}
+\usepackage{geometry}
+\geometry{margin=0.75in}
+\usepackage{indentfirst}
+\usepackage{microtype}
+\usepackage{bussproofs}
+\usepackage{listings,upquote}
+\lstset{basicstyle=\ttfamily\footnotesize,columns=fullflexible,frame=single,keepspaces=true}
+\usepackage{amsmath,amsthm,amssymb}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage[shortlabels]{enumitem}
+\usepackage{hyperref}
+\usepackage[makeroom]{cancel}
+
+\frenchspacing
+
+\title{Extending Hoare Logic Prover Design Note}
+\author{Logan Schmalz}
+\date{7 November 2025}
+\begin{document}
+\maketitle
+
+\section{Intro}
+I extended the given Hoare logic prover by adding functions, fixing the while loops, and adding arrays.
+I will cover these in the separate sections.
+
+\section{Static Single Assignment}
+I implemented static single assignment to help keep track of function arguments and parameters, as well as to fix while loops.
+It is not true SSA as it works backwards during execution of the $\mathrm{wp}$ function.
+Whenever a variable is assigned to, it is given a new SSA assignment for the ``earlier'' parts of the program (i.e. lower numbered lines in the file).
+This includes when a function takes a variable as a mutable reference.
+Every ``later'' instance of the variable (i.e. that already exists in the post-condition) gets substituted for the new assignment.
+Additionally, every function gets unique parameter and return value names when called, so functions can be called multiple times (including recursively) without overlapping names.
+Ideally I would have liked to create a full SSA pre-pass as this implementation made the $\mathrm{wp}$ code very messy, but this alternative implementation was suitable for this project.
+
+I believe my implementation is not perfect, specifically my test case \lstinline|functions/sub_to_zero.py|, although quite a ridiculous program, seems to have some issues which I believe are caused by SSA in if statements being poorly designed.
+Specifically, removing the \lstinline|n=0| line in the \lstinline|n==0| case seems to break verification due to parameter naming.
+
+\subsection{Assignment}
+When a variable is assigned to, it is given a new name for earlier lines in the program, as well as if it occurs on the right-hand side.
+For example, the line \lstinline|y = y + 1| really ends up looking like \lstinline|y0 = y1 + 1|, where \lstinline|y1| must be sufficiently well-defined by earlier parts of the program as $\mathrm{wp}$ works backwards.
+This freshness also allows the left-hand side of an assignment to be directly substituted as the $\mathrm{ret}$ variable for a function, which makes it slightly easier to track how the program state relates to the weakest preconditions.
+
+\section{Functions}
+\subsection{Function Bodies}
+Including functions first requires verifying function bodies.
+Functions are defined by the \lstinline|proc| node.
+As a pre-pass, my prover finds all the functions from the AST and verifies them.
+Each function has a set of requires for its parameters, ensures for its outputs, a body, and also a list of variables takes as mutable references that can be modified.
+$\mathrm{entry\_eqs}$ is a set of equations that enforces as a function is entered, all its parameters are the same as their old versions.
+This is done according to the following rule:
+\[
+(\mathrm{requires} \;\land\; \mathrm{entry\_eqs}) \;\Rightarrow\; \mathrm{wp}(\mathrm{body}, \mathrm{ensures})
+\]
+
+Note that $\mathrm{requires}$ has fresh names after the $\mathrm{wp}$ call which must be satisfied earlier in the program.
+
+Test cases: \lstinline|functions/factorial.py|, \lstinline|functions/sum_array.py|
+
+
+\subsection{Function Calls}
+When a function is called, the arguments are passed to the function and replace the unique parameter names in the requires and any instances of $\mathrm{old(param)}$ in the ensures.
+There is a lot of complicated substitution that occurs due to my SSA strategy to make sure things stay unique accross multiple function calls.
+Any variables that are marked as $\mathrm{modifies}$ by a function are an additional key focus of this substitution.
+Then the $\mathrm{requires}$ is checked with the arguments, they must be met otherwise the call will be invalid.
+The $\mathrm{ensures}$ from the function must imply the desired post-condition.
+A fresh $\mathrm{ret}$ value name is also generated for each function call, in case the return value is not assigned to a variable.
+
+\[
+(\mathrm{requires} \;\land\; (\mathrm{ensures} \;\Rightarrow\; \mathrm{post}))
+\]
+
+Test cases:
+\lstinline|functions/test_multiple_calls.py|,
+\lstinline|functions/test_return.py|,
+\lstinline|functions/test_modifies.py|.
+
+\section{While Loops}
+I fixed while loops through my SSA strategy.
+This also involves complicated substitutions as the invariant must be checked with multiple different SSA configurations both when the loop is entered and after an execution of the body.
+
+Test cases: \lstinline|test_while_simple.py|, \lstinline|test_while_function.py|
+
+\section{Arrays}
+I added array variables.
+They work as expected with store/select semantics, where \lstinline|A[i] == x| (select) iff there exists a previous line where \lstinline|A[i] := x| (store).
+Array aliasing does not exist, instead arrays are copy-by-value on assignment, because aliasing seemed to require much more complex logic for weakest preconditions (probably separation logic).
+
+It is also possible to construct array literals.
+I added length tracking, but it only works based on variable names, so array literals do not have length tracking.
+This means if a function depends on a fact about an array's length, calling it with an array literal as an argument will probably not verify.
+
+Also, I did not fully implement proper SSA for array variables. The test cases I have do not run into problems, but they are relatively simple.
+I feel the SSA implementation for integers is sufficient to demonstrate that the general strategy works.
+
+Test cases: \lstinline|arrays/test_select_after_store.py|, \lstinline|arrays/test_array_alias.py|, \lstinline|arrays/test_array_store.py|
+
+\section{Counter-examples}
+One counter-example is \lstinline|functions/test_check_multiple_functions.py| where the function \lstinline|bad_incr| should fail to verify.
+
+\end{document}
